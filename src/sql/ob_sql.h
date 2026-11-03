@@ -85,6 +85,13 @@ public:
                            bool is_inner_sql) = 0;
 };
 
+// seekdb file sql (problem 2): forward declaration, see
+// sql/engine/basic/ob_file_sql_rewrite.h
+namespace filesql
+{
+struct CopyExportSpec;
+}
+
 class ObISqlExecutionIdProvider
 {
 public:
@@ -373,6 +380,13 @@ private:
   int handle_text_query(const common::ObString &stmt,
                         ObSqlCtx &context,
                         ObResultSet &result);
+  // seekdb file sql: execute COPY (query|table) TO 'path' by running the
+  // inner query on a nested result set and streaming the rows into the
+  // destination file (defined in ob_sql.cpp)
+  int execute_file_copy(struct filesql::CopyExportSpec &spec,
+                        ObSqlCtx &context,
+                        ObResultSet &result,
+                        common::ObIAllocator &allocator);
   int handle_physical_plan(const common::ObString &trimed_stmt,
                            ObSqlCtx &context,
                            ObResultSet &result,

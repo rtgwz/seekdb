@@ -24,6 +24,7 @@
 #include "sql/plan_cache/ob_ps_cache.h"
 #include "sql/plan_cache/ob_pcv_set.h"
 #include "sql/ob_sql_init.h"
+#include "sql/engine/basic/ob_file_sql_processor.h"
 #include "sql/resolver/ob_resolver.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
@@ -1944,12 +1945,52 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
 
   ObIAllocator &allocator = THIS_WORKER.get_sql_arena_allocator();
   ObSQLSessionInfo &session = result.get_session();
-  
+
   ObExecContext& ectx = result.get_exec_context();
-  int get_plan_err = OB_SUCCESS; //used for judge whether add plan to plan cache
+  int get_plan_err = OB_SUCCESS; //used to judge whether add plan to plan cache
   bool use_plan_cache = session.get_local_ob_enable_plan_cache();
   ObPlanCacheCtx *pc_ctx = NULL;
   bool is_begin_commit_stmt = false;
+
+  // seekdb file sql: transparently rewrite read_csv/read_json/read_ndjson/
+  // read_parquet/glob table functions, DESCRIBE SELECT and COPY ... TO
+  // statements into native SQL before plan generation. Statements without
+  // any marker pass through untouched with negligible overhead.
+  if (OB_SUCC(ret)) {
+    ObString file_sql_stmt;
+    bool file_sql_rewritten = false;
+    bool is_file_copy = false;
+    filesql::CopyExportSpec copy_spec;
+    if (OB_FAIL(ObFileSqlProcessor::rewrite_stmt(trimed_stmt, session, allocator,
+                                                 file_sql_stmt, file_sql_rewritten,
+                                                 is_file_copy, copy_spec))) {
+      LOG_WARN("file sql rewrite failed", K(ret));
+      result.get_exec_context().set_need_disconnect(false);
+    } else if (file_sql_rewritten) {
+      if (is_file_copy) {
+        if (OB_FAIL(SMART_CALL(execute_file_copy(copy_spec, context, result,
+                                                 allocator)))) {
+          LOG_WARN("file sql copy execution failed", K(ret));
+          result.get_exec_context().set_need_disconnect(false);
+        } else {
+          // answer the client with a plain OK packet
+          const char *ok_stmt = "SET @__file_sql_copy__ = 1";
+          int64_t len = static_cast<int64_t>(strlen(ok_stmt));
+          char *buf = static_cast<char *>(allocator.alloc(len + 1));
+          if (OB_ISNULL(buf)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            MEMCPY(buf, ok_stmt, len);
+            buf[len] = '\0';
+            trimed_stmt.assign_ptr(buf, static_cast<ObString::obstr_size_t>(len));
+          }
+        }
+      } else {
+        trimed_stmt = file_sql_stmt;
+        context.cur_sql_ = trimed_stmt;
+      }
+    }
+  }
 
   if (OB_FAIL(ret)) {
     // do nothing
@@ -2015,6 +2056,80 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   }
   if (NULL != pc_ctx) {
     pc_ctx->~ObPlanCacheCtx();
+  }
+  return ret;
+}
+
+int ObSql::execute_file_copy(filesql::CopyExportSpec &spec,
+                             ObSqlCtx &context,
+                             ObResultSet &result,
+                             ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  ObResultSet *inner_rs = ObResultSet::alloc(result.get_session(), allocator);
+  if (OB_ISNULL(inner_rs)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("alloc inner result set for file copy failed", K(ret));
+  } else if (OB_FAIL(SMART_CALL(handle_text_query(
+                 ObString(static_cast<ObString::obstr_size_t>(spec.inner_query.size()),
+                          spec.inner_query.c_str()),
+                 context, *inner_rs)))) {
+    LOG_WARN("file sql copy inner query failed", K(ret), "query", spec.inner_query.c_str());
+  } else if (OB_FAIL(inner_rs->open())) {
+    LOG_WARN("file sql copy inner query open failed", K(ret));
+  } else {
+    FILE *file = fopen(spec.dest_canonical.c_str(), "wb");
+    if (OB_ISNULL(file)) {
+      ret = OB_IO_ERROR;
+      LOG_WARN("open copy destination failed", K(ret), "path", spec.dest_canonical.c_str());
+    } else {
+      // optional header line from the inner field metadata
+      if (spec.with_header) {
+        const ColumnsFieldIArray *fields = inner_rs->get_field_columns();
+        if (OB_NOT_NULL(fields)) {
+          for (int64_t i = 0; OB_SUCC(ret) && i < fields->count(); ++i) {
+            const ObField &field = fields->at(i);
+            std::string name(field.cname_.ptr(), field.cname_.length());
+            std::string escaped = filesql::csv_escape_field(name, spec.delimiter,
+                                                            spec.quote);
+            if (i > 0 && fwrite(spec.delimiter.data(), 1, spec.delimiter.size(), file)
+                           != spec.delimiter.size()) {
+              ret = OB_IO_ERROR;
+            } else if (fwrite(escaped.data(), 1, escaped.size(), file)
+                       != escaped.size()) {
+              ret = OB_IO_ERROR;
+            }
+          }
+          if (OB_SUCC(ret)) {
+            fputc('\n', file);
+          }
+        }
+      }
+      const ObNewRow *row = NULL;
+      while (OB_SUCC(ret)) {
+        ret = inner_rs->get_next_row(row);
+        if (OB_ITER_END == ret) {
+          ret = OB_SUCCESS;
+          break;
+        } else if (OB_FAIL(ret)) {
+          LOG_WARN("file sql copy fetch row failed", K(ret));
+        } else if (OB_FAIL(ObFileSqlProcessor::write_copy_row(file, row,
+                                                              result.get_session(),
+                                                              spec))) {
+          LOG_WARN("file sql copy write row failed", K(ret));
+        }
+      }
+      fclose(file);
+    }
+    int client_ret = OB_SUCCESS;
+    inner_rs->close(client_ret);
+    if (OB_SUCC(ret) && OB_FAIL(client_ret)) {
+      ret = client_ret;
+    }
+  }
+  if (OB_NOT_NULL(inner_rs)) {
+    ObResultSet::free(inner_rs);
+    inner_rs = NULL;
   }
   return ret;
 }
