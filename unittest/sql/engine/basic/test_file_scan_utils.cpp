@@ -257,7 +257,7 @@ static void test_rewriter()
       "select file from glob('" + g_dir + "/*') order by file", ctx, r);
   CHECK(ret == FS_OK && r.handled);
   CHECK(r.sql.find(") glob order by file") != std::string::npos);
-  CHECK(r.sql.substr(r.sql.find(") glob") + 7) == " order by file");
+  CHECK(r.sql.substr(r.sql.find(") glob") + 6) == " order by file");
 
   // enabled off -> not supported
   FileSqlSessionCtx off;
@@ -307,7 +307,7 @@ static void test_rewriter()
       "select count(*) from read_parquet('" + g_dir + "/simple.parquet') p",
       ctx, r);
   CHECK(ret == FS_OK && r.handled);
-  CHECK(r.sql.find("CAST(0 AS SIGNED)") != std::string::npos);
+  CHECK(r.sql.find("SELECT 0 AS `c1`") != std::string::npos);
 
   // copy
   ret = rewrite_file_sql(

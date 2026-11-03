@@ -17,9 +17,6 @@ namespace sql
 namespace filesql
 {
 
-namespace
-{
-
 inline bool is_ident_char(char c)
 {
   return isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$' || c == '#';
@@ -242,9 +239,10 @@ static int parse_args(const std::string &text, std::vector<FuncArg> &args)
       return FS_ERR_PARSE;
     }
     sc.skip_ws_and_comments();
-    if (sc.cur() == ',') { ++sc.p; continue; }
+    if (sc.cur() == ',') { ++sc.p; }
+    // both comma and plain whitespace separate arguments (duckdb style bare
+    // option lists such as "format csv, header, nullstr 'NULL'")
     if (sc.eof()) break;
-    return FS_ERR_PARSE;
   }
   return FS_OK;
 }
@@ -470,8 +468,12 @@ std::string csv_escape_field(const std::string &v, const std::string &delim,
   if (!need) return v;
   std::string out = quote;
   for (size_t i = 0; i < v.size(); ++i) {
-    if (v.compare(i, quote.size(), quote) == 0) { out += quote; i += quote.size() - 1; }
-    else out += v[i];
+    if (v.compare(i, quote.size(), quote) == 0) {
+      out += quote; out += quote;   // doubled
+      i += quote.size() - 1;
+    } else {
+      out += v[i];
+    }
   }
   out += quote;
   return out;
@@ -631,17 +633,21 @@ static bool find_next_call(Scanner &sc, ReadFuncMatch &m, int &err)
           probe.skip_ws_and_comments();
           std::string alias;
           if (!probe.eof()) {
+            size_t before_peek = probe.p;
             std::string maybe_as;
             if (probe.read_ident(maybe_as) && ieq(maybe_as, "as")) {
               probe.skip_ws_and_comments();
               if (!read_alias_token(probe, alias)) { err = FS_ERR_PARSE; return false; }
               sc.p = probe.p;
-            } else if (is_ident_start(probe.cur()) || probe.cur() == '`') {
-              std::string bare;
-              Scanner p2(sc.s); p2.p = probe.p;
-              if (read_alias_token(p2, bare) && !is_reserved_after_table(bare)) {
-                alias = bare;
-                sc.p = p2.p;
+            } else {
+              probe.p = before_peek;   // unread the identifier we just peeked
+              if (is_ident_start(probe.cur()) || probe.cur() == '`') {
+                std::string bare;
+                Scanner p2(sc.s); p2.p = probe.p;
+                if (read_alias_token(p2, bare) && !is_reserved_after_table(bare)) {
+                  alias = bare;
+                  sc.p = p2.p;
+                }
               }
             }
           }
@@ -814,34 +820,75 @@ int rewrite_file_sql(const std::string &input_sql, const FileSqlSessionCtx &ctx,
       if (pret != FS_OK) return pret;
       // support duckdb style bare words: (FORMAT CSV, HEADER, NULLSTR 'NULL')
       // and named style: (format = 'csv', header = true)
+      //
+      // first fold the token stream into effective key/value pairs:
+      //  - a bare known key starts a new option (flushing a previous
+      //    standalone `header` flag first)
+      //  - a bare non-key identifier or a string literal completes the
+      //    pending option as its value
+      struct OptKey { const char *name; bool flag; };
+      static const OptKey OPT_KEYS[] = {
+        {"format", false}, {"nullstr", false}, {"null", false},
+        {"delimiter", false}, {"delim", false}, {"quote", false},
+        {"header", true},
+      };
+      std::vector<FuncArg> effective;
       std::string pending_key;
       bool has_pending = false;
       for (size_t i = 0; i <= oargs.size(); ++i) {
-        bool flush = (i == oargs.size());
-        std::string key, val;
-        bool is_string = false;
-        if (!flush) {
-          const FuncArg &a = oargs[i];
-          if (a.is_named) {
-            key = a.key; val = a.value; is_string = a.is_string;
-          } else if (a.is_string) {
-            if (!has_pending) return FS_ERR_PARSE;
-            key = pending_key; val = a.value; is_string = true; has_pending = false;
-          } else {
-            if (has_pending) {
-              // previous bare keyword gets this identifier as its value
-              key = pending_key; val = a.value; is_string = false; has_pending = false;
-            } else {
-              pending_key = lower_copy(a.value);
-              has_pending = true;
-              continue;
-            }
+        bool at_end = (i == oargs.size());
+        if (at_end) {
+          if (has_pending) {
+            if (pending_key != "header") return FS_ERR_PARSE;
+            FuncArg fa; fa.is_named = true; fa.key = "header"; fa.value = "true";
+            effective.push_back(fa);
           }
-        } else if (has_pending) {
-          key = pending_key; val = "true";
-        } else {
           break;
         }
+        const FuncArg &a = oargs[i];
+        if (a.is_named) {
+          if (has_pending) {
+            if (pending_key != "header") return FS_ERR_PARSE;
+            FuncArg fa; fa.is_named = true; fa.key = "header"; fa.value = "true";
+            effective.push_back(fa);
+            has_pending = false;
+          }
+          effective.push_back(a);
+          continue;
+        }
+        if (a.is_string) {
+          if (!has_pending) return FS_ERR_PARSE;
+          FuncArg fa; fa.is_named = true; fa.key = pending_key; fa.value = a.value;
+          fa.is_string = true;
+          effective.push_back(fa);
+          has_pending = false;
+          continue;
+        }
+        std::string ident = lower_copy(a.value);
+        bool is_known = false;
+        for (size_t k = 0; k < sizeof(OPT_KEYS)/sizeof(OPT_KEYS[0]); ++k) {
+          if (ident == OPT_KEYS[k].name) { is_known = true; break; }
+        }
+        if (is_known) {
+          if (has_pending) {
+            if (pending_key != "header") return FS_ERR_PARSE;
+            FuncArg fa; fa.is_named = true; fa.key = "header"; fa.value = "true";
+            effective.push_back(fa);
+          }
+          pending_key = ident;
+          has_pending = true;
+        } else {
+          if (!has_pending) return FS_ERR_PARSE;
+          FuncArg fa; fa.is_named = true; fa.key = pending_key; fa.value = a.value;
+          effective.push_back(fa);
+          has_pending = false;
+        }
+      }
+      for (size_t i = 0; i < effective.size(); ++i) {
+        const FuncArg &a = effective[i];
+        std::string key, val;
+        bool is_string = false;
+        key = a.key; val = a.value; is_string = a.is_string;
         if (key == "format") {
           if (!ieq(val, "csv")) {
             if (ieq(val, "json") || ieq(val, "parquet")) return FS_ERR_NOT_SUPPORTED;

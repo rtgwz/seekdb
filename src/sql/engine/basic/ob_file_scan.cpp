@@ -408,23 +408,29 @@ int infer_csv_schema(const std::string &path, const FileScanOptions &opt,
 
 static int csv_scan_cb(void *p, const std::vector<std::string> &rec, bool &)
 {
-  struct Ctx { const std::vector<FileColumn> *schema; FileRowSink sink; void *sctx; int64_t *n; };
+  struct Ctx { const std::vector<FileColumn> *schema; FileRowSink sink; void *sctx;
+               bool skip_first; };
   Ctx *ctx = static_cast<Ctx *>(p);
+  if (ctx->skip_first) {
+    ctx->skip_first = false;
+    return FS_OK;   // header record already consumed during schema inference
+  }
   FileRow row;
   row.reserve(ctx->schema->size());
   for (size_t i = 0; i < ctx->schema->size(); ++i) {
     const std::string &cell = i < rec.size() ? rec[i] : "";
     row.push_back(normalize_cell(cell, (*ctx->schema)[i].type, ""));
   }
-  ++(*ctx->n);
   return ctx->sink(ctx->sctx, row);
 }
 
-int scan_csv(const std::string &path, const FileScanOptions &,
+int scan_csv(const std::string &path, const FileScanOptions &opt,
              const std::vector<FileColumn> &schema, FileRowSink sink, void *sctx)
 {
-  struct Ctx { const std::vector<FileColumn> *schema; FileRowSink sink; void *sctx; int64_t n; };
-  Ctx ctx; ctx.schema = &schema; ctx.sink = sink; ctx.sctx = sctx; ctx.n = 0;
+  struct Ctx { const std::vector<FileColumn> *schema; FileRowSink sink; void *sctx;
+               bool skip_first; };
+  Ctx ctx; ctx.schema = &schema; ctx.sink = sink; ctx.sctx = sctx;
+  ctx.skip_first = opt.has_header;
   return foreach_csv_record(path, ',', csv_scan_cb, &ctx);
 }
 
@@ -445,6 +451,11 @@ public:
     Value() : kind(J_NULL), b(false), i(0), d(0) {}
   };
   static int parse(const std::string &text, Value &out)
+  {
+    MiniJson p;
+    return p.parse_impl(text, out);
+  }
+  int parse_impl(const std::string &text, Value &out)
   {
     p_ = text.c_str(); end_ = p_ + text.size();
     int ret = parse_value(out);
@@ -647,6 +658,16 @@ static int jsonl_infer_line(void *p, const std::string &line, int64_t)
     if (is_null) col->nullable = true;
     else merge_cell_type(cell, col->type, col->nullable);
   }
+  // keys absent from this record count as NULL for union-by-name semantics
+  if (root.members.size() < ctx->schema->size()) {
+    for (size_t i = 0; i < ctx->schema->size(); ++i) {
+      bool present = false;
+      for (size_t k = 0; k < root.members.size(); ++k) {
+        if (root.members[k].first == (*ctx->schema)[i].name) { present = true; break; }
+      }
+      if (!present) (*ctx->schema)[i].nullable = true;
+    }
+  }
   return FS_OK;
 }
 
@@ -810,9 +831,11 @@ static const int TT_TRUE = 1, TT_FALSE = 2, TT_I8 = 3, TT_I16 = 4, TT_I32 = 5,
                  TT_I64 = 6, TT_DOUBLE = 7, TT_BINARY = 8, TT_LIST = 9,
                  TT_SET = 10, TT_MAP = 11, TT_STRUCT = 12;
 
-// generic struct field walker: calls back for each field; handles skipping
+// generic struct field walker: calls back for each field; when the callback
+// returns non-zero the field value was consumed by it, otherwise the value
+// is skipped structurally.
 struct FieldWalk {
-  // returns 0 continue, non-zero abort
+  // returns 0 struct ended, non-zero error
   static int walk(ThriftReader &r, int (*cb)(void *, int16_t fid, int ttype,
                                              ThriftReader &, bool in_list, void *),
                   void *ctx)
@@ -827,15 +850,19 @@ struct FieldWalk {
       if (h >> 4) fid = static_cast<int16_t>(last_fid + (h >> 4));
       else fid = static_cast<int16_t>(r.zigzag());
       last_fid = fid;
-      int ret = skip_or_cb(r, fid, ttype, cb, ctx, false);
-      if (ret != 0) return ret;
+      bool consumed = (cb != NULL && cb(ctx, fid, ttype, r, false, NULL) != 0);
+      if (!consumed) {
+        int ret = skip_or_cb(r, fid, ttype, NULL, NULL, true);
+        if (ret != 0) return ret;
+      }
     }
   }
+  // structural skip of one value of the given thrift type; cb unused
   static int skip_or_cb(ThriftReader &r, int16_t fid, int ttype,
                         int (*cb)(void *, int16_t, int, ThriftReader &, bool, void *),
                         void *ctx, bool in_list)
   {
-    if (cb && cb(ctx, fid, ttype, r, in_list, NULL) != 0) return 1; // caller consumed
+    (void)fid; (void)cb; (void)ctx; (void)in_list;
     switch (ttype) {
       case TT_TRUE:
       case TT_FALSE:
@@ -857,15 +884,10 @@ struct FieldWalk {
         break;
       }
       case TT_MAP: {
-        unsigned char h = r.byte();
-        int kt = h & 0xf, vt = (h >> 4) & 0xf;
-        uint64_t cnt = 0;
-        if ((h & 0xf0) == 0) {
-          cnt = r.uvarint();
-          if (cnt == 0) break;
-        } else {
-          cnt = (h >> 4);
-        }
+        uint64_t cnt = r.uvarint();
+        if (cnt == 0) break;
+        unsigned char tt = r.byte();
+        int kt = tt & 0xf, vt = (tt >> 4) & 0xf;
         for (uint64_t k = 0; k < cnt; ++k) {
           skip_or_cb(r, -1, kt, NULL, NULL, true);
           skip_or_cb(r, -1, vt, NULL, NULL, true);
@@ -1270,11 +1292,7 @@ int ParquetFile::open(const std::string &path)
   std::string footer(footer_len, '\0');
   in.seekg(file_size - 8 - footer_len);
   in.read(&footer[0], footer_len);
-  // magic at start
-  if (footer[0] != 'P' || footer[1] != 'A' || footer[2] != 'R' || footer[3] != '1') {
-    return FS_ERR_BAD_FORMAT;
-  }
-  parquet::ThriftReader r(footer.c_str() + 4, footer_len - 4);
+  parquet::ThriftReader r(footer.c_str(), footer_len);
   parquet::FileMetaParse fp; fp.fm = &meta;
   if (parquet::FieldWalk::walk(r, parquet::fm_cb, &fp) != 0) return FS_ERR_BAD_FORMAT;
 
