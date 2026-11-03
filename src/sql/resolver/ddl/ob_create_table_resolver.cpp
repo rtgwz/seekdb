@@ -25,6 +25,7 @@
 #include "sql/optimizer/ob_optimizer_util.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/resolver/ddl/ob_vec_index_builder_util.h"
+#include "sql/ai_column/ob_ai_column_resolver_util.h"
 
 namespace oceanbase
 {
@@ -471,11 +472,15 @@ int ObCreateTableResolver::check_column_name_duplicate(const ParseNode *node)
       ParseNode *element = node->children_[i];
       if (OB_ISNULL(element)) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (OB_LIKELY(T_COLUMN_DEFINITION == element->type_)) {
+      } else if (OB_LIKELY(T_COLUMN_DEFINITION == element->type_
+                           || T_AI_COLUMN_DEF == element->type_)) {
+        // T_AI_COLUMN_DEF uses the same children_[0] = T_COLUMN_REF layout as
+        // T_COLUMN_DEFINITION, so the duplicate name check below applies to
+        // AI columns as well. Column ids used by the AI hidden columns are
+        // generated after the name pass; see ObAiColumnResolverUtil.
         if (OB_USER_ROW_MAX_COLUMNS_COUNT < column_name_set_.count()) {
           ret = OB_ERR_TOO_MANY_COLUMNS;
-        } else if (element->num_child_ < COLUMN_DEFINITION_NUM_CHILD ||
-            OB_ISNULL(element->children_) || OB_ISNULL(element->children_[COLUMN_REF_NODE]) ||
+        } else if (OB_ISNULL(element->children_) || OB_ISNULL(element->children_[COLUMN_REF_NODE]) ||
             T_COLUMN_REF != element->children_[COLUMN_REF_NODE]->type_ ||
             COLUMN_DEF_NUM_CHILD != element->children_[COLUMN_REF_NODE]->num_child_) {
           ret = OB_ERR_UNEXPECTED;
@@ -648,12 +653,17 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       ParseNode *element = node->children_[i];
       CK (OB_NOT_NULL(element));
       if (OB_FAIL(ret)) {
-      } else if ((RESOLVE_NON_COL == resolve_rule && T_COLUMN_DEFINITION == element->type_)
-                 || (RESOLVE_COL_ONLY == resolve_rule && T_COLUMN_DEFINITION != element->type_)) {
+      } else if ((RESOLVE_NON_COL == resolve_rule
+                  && (T_COLUMN_DEFINITION == element->type_
+                      || T_AI_COLUMN_DEF == element->type_))
+                 || (RESOLVE_COL_ONLY == resolve_rule
+                     && T_COLUMN_DEFINITION != element->type_
+                     && T_AI_COLUMN_DEF != element->type_)) {
         //continue
-      } else if (OB_LIKELY(T_COLUMN_DEFINITION == element->type_)) {
+      } else if (OB_LIKELY(T_COLUMN_DEFINITION == element->type_
+                           || T_AI_COLUMN_DEF == element->type_)) {
         ObColumnSchemaV2 column;
-        
+
         ObColumnResolveStat stat;
         common::ObString pk_name;
         if (OB_INVALID_ID == column.get_column_id()) {
@@ -676,9 +686,59 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       ParseNode *element = node->children_[i];
       CK (OB_NOT_NULL(element));
       if (OB_FAIL(ret)) {
-      } else if ((RESOLVE_NON_COL == resolve_rule && T_COLUMN_DEFINITION == element->type_)
-                 || (RESOLVE_COL_ONLY == resolve_rule && T_COLUMN_DEFINITION != element->type_)) {
+      } else if ((RESOLVE_NON_COL == resolve_rule
+                  && (T_COLUMN_DEFINITION == element->type_
+                      || T_AI_COLUMN_DEF == element->type_))
+                 || (RESOLVE_COL_ONLY == resolve_rule
+                     && T_COLUMN_DEFINITION != element->type_
+                     && T_AI_COLUMN_DEF != element->type_)) {
         continue;
+      } else if (T_AI_COLUMN_DEF == element->type_) {
+        // AI column: <name> <type> AI COLUMN (AI_COMPLETE/AI_EMBED(...))
+        //                       [WITH (sync_mode=..., max_retries=...)]
+        // 1. name (children_[0]) and data type (children_[1]) follow the
+        //    T_COLUMN_DEFINITION layout
+        // 2. validations + typed prompt + metadata: ObAiColumnResolverUtil
+        // 3. three hidden columns (state/request/result_spec) are appended
+        //    after the result column
+        CK (ele_pos >= 0 && ele_pos < resolved_cols_count);
+        if (OB_SUCC(ret)) {
+          ObColumnSchemaV2 &column = resolved_cols.at(ele_pos);
+          ++ele_pos;
+          common::ObDataType data_type;
+          ObAiColumnMeta ai_meta;
+          ObSEArray<common::ObString, 4> ai_column_names; // TODO: collect from stmt
+          if (OB_FAIL(ObResolverUtils::resolve_data_type(
+                  *element->children_[1], column.get_column_name(), data_type,
+                  false, session_info_->get_session_nls_param(),
+                  false, false))) {
+          } else if (OB_FAIL(column.set_data_type(data_type))) {
+          } else if (OB_FAIL(ObAiColumnResolverUtil::resolve_ai_column_def(
+                  *element, column, ai_column_names, *allocator_, ai_meta))) {
+          } else {
+            // hidden column ids are allocated from the same generator so the
+            // ids stay unique inside the table
+            uint64_t hidden_ids[3];
+            ObSEArray<uint64_t, 3> hidden_id_arr;
+            for (int64_t h = 0; OB_SUCC(ret) && h < 3; ++h) {
+              hidden_ids[h] = gen_column_id();
+              OZ (hidden_id_arr.push_back(hidden_ids[h]));
+            }
+            ai_meta.column_id_ = column.get_column_id();
+            ai_meta.state_column_id_ = hidden_ids[0];
+            ai_meta.request_column_id_ = hidden_ids[1];
+            ai_meta.result_spec_column_id_ = hidden_ids[2];
+            if (OB_FAIL(ret)) {
+            } else if (OB_FAIL(ObAiColumnResolverUtil::add_hidden_columns(
+                    table_schema, ai_meta, hidden_id_arr))) {
+            } else if (OB_FAIL(table_schema.add_column(column))) {
+            } else {
+              // TODO(server): persist ai_meta into oceanbase.__all_ai_column
+              // after the CREATE TABLE ddl finishes
+              // (ObAiColumnTaskUtil::build_meta_insert_sql)
+            }
+          }
+        }
       } else if (OB_LIKELY(T_COLUMN_DEFINITION == element->type_)) {
         bool is_modify_column_visibility = false;
         const bool is_create_table_as = (RESOLVE_COL_ONLY == resolve_rule);

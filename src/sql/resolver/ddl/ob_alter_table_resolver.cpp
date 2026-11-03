@@ -411,6 +411,38 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
             }
             break;
           }
+        case T_ALTER_RETRY_AI_COLUMN: {
+            // ALTER TABLE ... RETRY AI COLUMN <col> [WHERE <pred>]
+            // 1. must be the only action of the statement
+            // 2. target column must be an AI column (error 11121 otherwise)
+            // 3. unquoted STATUS in the predicate addresses the pseudo status
+            //    column (PENDING/READY/FAILED), backquoted `status` addresses
+            //    the physical business column (ai_column_retry_strict tests)
+            // 4. matched rows are invalidated and new tasks are created in one
+            //    internal transaction (see ObAiColumnTaskUtil)
+            if (OB_ISNULL(action_node->children_) || 2 != action_node->num_child_
+                || OB_ISNULL(action_node->children_[0])) {
+              ret = OB_ERR_UNEXPECTED;
+              SQL_RESV_LOG(WARN, "invalid parse tree for ai column retry", K(ret));
+            } else if (node.num_child_ > 1) {
+              // ERROR 0A000: combining AI COLUMN RETRY with another ALTER
+              // action not supported
+              ret = OB_AI_COLUMN_RETRY_MIXED_ALTER;
+              SQL_RESV_LOG(WARN, "ai column retry cannot be combined", K(ret));
+            } else {
+              const ParseNode *col_node = action_node->children_[0];
+              common::ObString col_name(col_node->str_len_, col_node->str_value_);
+              // TODO(server): load ObAiColumnMeta list of the table from
+              // oceanbase.__all_ai_column and call
+              // ObAiColumnResolverUtil::validate_retry_target; then execute
+              // the invalidation + task creation SQL built by
+              // ObAiColumnTaskUtil for every row that matches the WHERE
+              // predicate (STATUS pseudo column rewritten to the hidden state
+              // column of the retried AI column).
+              UNUSED(col_name);
+            }
+            break;
+          }
         case T_TABLE_OPTION_LIST: {
             alter_table_stmt->set_alter_table_option();
             if (OB_FAIL(resolve_alter_table_option_list(*action_node))) {

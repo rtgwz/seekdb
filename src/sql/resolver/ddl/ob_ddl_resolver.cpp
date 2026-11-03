@@ -1754,7 +1754,8 @@ int ObDDLResolver::resolve_column_name(ObColumnSchemaV2 &column,
   ParseNode *column_definition_ref_node = NULL;
   CK (OB_NOT_NULL(node));
   CK (OB_NOT_NULL(node->children_[0]));
-  CK (node->type_ == T_COLUMN_DEFINITION);
+  // T_AI_COLUMN_DEF shares the children_[0] = T_COLUMN_REF layout
+  CK (node->type_ == T_COLUMN_DEFINITION || node->type_ == T_AI_COLUMN_DEF);
   if (OB_SUCC(ret)) {
     column_definition_ref_node = node->children_[0];
     OZ (resolve_column_definition_ref(column, column_definition_ref_node, false));
