@@ -39,6 +39,8 @@ int ObAiColumnTaskUtil::build_invalidate_sql(const share::schema::ObTableSchema 
       table_schema.get_column_schema(meta.state_column_id_);
   const share::schema::ObColumnSchemaV2 *request_col =
       table_schema.get_column_schema(meta.request_column_id_);
+  const common::ObString &db_name = table_schema.get_database_name_str();
+  const common::ObString &tb_name = table_schema.get_table_name_str();
   if (OB_ISNULL(state_col) || OB_ISNULL(request_col)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("hidden ai columns missing", K(ret), K(meta));
@@ -48,10 +50,8 @@ int ObAiColumnTaskUtil::build_invalidate_sql(const share::schema::ObTableSchema 
     if (OB_FAIL(sql.assign_fmt(
             "UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%.*s` = %ld, `%.*s` = %lu "
             "WHERE %.*s",
-            static_cast<int32_t>(table_schema.get_database_name().length()),
-            table_schema.get_database_name().ptr(),
-            static_cast<int32_t>(table_schema.get_table_name().length()),
-            table_schema.get_table_name().ptr(),
+            static_cast<int32_t>(db_name.length()), db_name.ptr(),
+            static_cast<int32_t>(tb_name.length()), tb_name.ptr(),
             static_cast<int32_t>(meta.column_name_.length()), meta.column_name_.ptr(),
             static_cast<int32_t>(state_col->get_column_name_str().length()),
             state_col->get_column_name_str().ptr(),
@@ -122,16 +122,16 @@ int ObAiColumnTaskUtil::build_strict_read_check_sql(
   int ret = OB_SUCCESS;
   const share::schema::ObColumnSchemaV2 *state_col =
       table_schema.get_column_schema(meta.state_column_id_);
+  const common::ObString &db_name = table_schema.get_database_name_str();
+  const common::ObString &tb_name = table_schema.get_table_name_str();
   if (OB_ISNULL(state_col)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("hidden state column missing", K(ret), K(meta));
   } else {
     ret = sql.assign_fmt(
         "SELECT 1 FROM `%.*s`.`%.*s` WHERE `%.*s` != %ld LIMIT 1",
-        static_cast<int32_t>(table_schema.get_database_name().length()),
-        table_schema.get_database_name().ptr(),
-        static_cast<int32_t>(table_schema.get_table_name().length()),
-        table_schema.get_table_name().ptr(),
+        static_cast<int32_t>(db_name.length()), db_name.ptr(),
+        static_cast<int32_t>(tb_name.length()), tb_name.ptr(),
         static_cast<int32_t>(state_col->get_column_name_str().length()),
         state_col->get_column_name_str().ptr(),
         static_cast<int64_t>(AI_ROW_READY));

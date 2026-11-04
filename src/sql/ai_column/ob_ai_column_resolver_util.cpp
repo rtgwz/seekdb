@@ -173,9 +173,39 @@ int ObAiColumnResolverUtil::resolve_ai_column_def(
     }
 
     // 3. dimension check for AI_EMBED(model, expr[, dim])
-    const bool is_vector = (ObVectorType == column.get_data_type());
+    // vector(N) is an extend type: the type info array carries the dimension
+    // (e.g. {"vector", "4"} or {"vector(4)"} depending on the parse path).
+    int64_t declared_dim = -1;
+    bool is_vector = false;
+    {
+      const common::ObIArray<common::ObString> &ext_info = column.get_extended_type_info();
+      char type_buf[OB_MAX_COLUMN_NAME_BUF_LENGTH + 8];
+      int64_t pos = 0;
+      for (int64_t e = 0; OB_SUCC(ret) && e < ext_info.count(); ++e) {
+        if (OB_FAIL(databuff_printf(type_buf, sizeof(type_buf), pos, "%.*s ",
+                static_cast<int32_t>(ext_info.at(e).length()), ext_info.at(e).ptr()))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
+        common::ObString joined(static_cast<int32_t>(pos), type_buf);
+        if (0 == joined.case_compare(0, 6, "vector")) {
+          is_vector = true;
+          const char *dim_str = nullptr;
+          for (int64_t e = 0; e < ext_info.count(); ++e) {
+            for (int64_t c = 0; c < ext_info.at(e).length(); ++c) {
+              char ch = ext_info.at(e).ptr()[c];
+              if (ch >= '0' && ch <= '9') { dim_str = ext_info.at(e).ptr() + c; break; }
+            }
+            if (OB_NOT_NULL(dim_str)) { break; }
+          }
+          if (OB_NOT_NULL(dim_str)) {
+            char *end = nullptr;
+            declared_dim = strtoll(dim_str, &end, 10);
+          }
+        }
+      }
+    }
     if (OB_SUCC(ret) && AI_FUNC_EMBED == meta.func_type_) {
-      const int64_t declared_dim = column.get_accuracy().get_length();
       if (expr_node->num_child_ >= 3 && OB_NOT_NULL(expr_node->children_[2])
           && T_INT == expr_node->children_[2]->type_) {
         const int64_t embed_dim = expr_node->children_[2]->value_;
@@ -253,7 +283,7 @@ int ObAiColumnResolverUtil::add_hidden_columns(
                                                common::ObVarcharType};
     for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
       share::schema::ObColumnSchemaV2 hidden_col;
-      char buf[OB_MAX_COLUMN_NAME_BUFFER_LENGTH + 1];
+      char buf[OB_MAX_COLUMN_NAME_BUF_LENGTH + 8];
       int64_t pos = 0;
       if (OB_FAIL(databuff_printf(buf, sizeof(buf), pos, "%s%.*s%s",
                   AI_COLUMN_HIDDEN_PREFIX,

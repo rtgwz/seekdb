@@ -14,6 +14,7 @@
 #include "sql/ai_column/ob_ai_column_def.h"
 #include "lib/string/ob_sql_string.h"
 #include "share/schema/ob_table_schema.h"
+#include "share/schema/ob_column_schema.h"
 
 namespace oceanbase
 {

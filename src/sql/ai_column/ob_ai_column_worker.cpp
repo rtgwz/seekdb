@@ -11,7 +11,6 @@
 #define USING_LOG_PREFIX SQL
 #include "sql/ai_column/ob_ai_column_worker.h"
 #include "sql/ai_column/ob_ai_column_task_util.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "lib/time/ob_time_utility.h"
 #include "share/schema/ob_schema_getter_guard.h"
 

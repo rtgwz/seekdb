@@ -710,7 +710,7 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           ObSEArray<common::ObString, 4> ai_column_names; // TODO: collect from stmt
           if (OB_FAIL(ObResolverUtils::resolve_data_type(
                   *element->children_[1], column.get_column_name(), data_type,
-                  false, session_info_->get_session_nls_param(),
+                  false, session_info_->get_session_nls_params(),
                   false, false))) {
           } else if (OB_FAIL(column.set_data_type(data_type))) {
           } else if (OB_FAIL(ObAiColumnResolverUtil::resolve_ai_column_def(
