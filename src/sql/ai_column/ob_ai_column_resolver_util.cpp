@@ -13,6 +13,10 @@
 #include "lib/string/ob_sql_string.h"
 #include "common/object/ob_obj_type.h"
 #include "share/schema/ob_ai_column_spec.h"
+#include "sql/session/ob_sql_session_info.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "query/session/ob_session_inner_sql.h"
+#include "common/mysqlclient/ob_isql_client.h"
 
 namespace oceanbase
 {
@@ -380,6 +384,105 @@ bool ObAiColumnResolverUtil::status_refers_to_pseudo_column(
     is_pseudo = !(is_backquoted && OB_NOT_NULL(physical));
   }
   return is_pseudo;
+}
+
+
+bool ObAiColumnResolverUtil::is_ai_result_column(
+    const share::schema::ObTableSchema &table_schema,
+    const share::schema::ObColumnSchemaV2 &column)
+{
+  bool is_ai = false;
+  if (!column.is_hidden()) {
+    char state_name[OB_MAX_COLUMN_NAME_BUF_LENGTH + 8];
+    int64_t pos = 0;
+    if (OB_SUCCESS == databuff_printf(state_name, sizeof(state_name), pos,
+            "%s%.*s%s", AI_COLUMN_HIDDEN_PREFIX,
+            static_cast<int32_t>(column.get_column_name_str().length()),
+            column.get_column_name_str().ptr(), AI_COLUMN_STATE_SUFFIX)) {
+      const share::schema::ObColumnSchemaV2 *state_col =
+          table_schema.get_column_schema(state_name);
+      is_ai = OB_NOT_NULL(state_col) && state_col->is_hidden();
+    }
+  }
+  return is_ai;
+}
+
+int ObAiColumnResolverUtil::check_strict_read(
+    const share::schema::ObTableSchema &table_schema,
+    const share::schema::ObColumnSchemaV2 &result_col,
+    ObSQLSessionInfo *session,
+    share::schema::ObSchemaGetterGuard *schema_guard)
+{
+  int ret = OB_SUCCESS;
+  bool strict = false;
+  if (OB_ISNULL(session) || session->is_inner()) {
+    // inner SQL must never recurse into the strict read check
+  } else if (OB_FAIL(session->get_sys_variable(
+          share::SYS_VAR_AI_COLUMN_STRICT_READ, strict))) {
+    LOG_WARN("failed to read ai_column_strict_read", K(ret));
+  } else if (!strict || !is_ai_result_column(table_schema, result_col)) {
+    // fast path: check disabled or the column is not an AI column
+  } else {
+    const share::schema::ObDatabaseSchema *db_schema = nullptr;
+    char state_name[OB_MAX_COLUMN_NAME_BUF_LENGTH + 8];
+    int64_t pos = 0;
+    if (OB_ISNULL(schema_guard)
+        || OB_FAIL(schema_guard->get_database_schema(
+                table_schema.get_database_id(), db_schema))
+        || OB_ISNULL(db_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to get database schema for strict read", K(ret));
+    } else if (OB_FAIL(databuff_printf(state_name, sizeof(state_name), pos,
+            "%s%.*s%s", AI_COLUMN_HIDDEN_PREFIX,
+            static_cast<int32_t>(result_col.get_column_name_str().length()),
+            result_col.get_column_name_str().ptr(), AI_COLUMN_STATE_SUFFIX))) {
+    } else {
+      common::ObSqlString sql;
+      if (OB_FAIL(sql.assign_fmt(
+              "SELECT 1 FROM `%.*s`.`%.*s` WHERE `%.*s` != %ld LIMIT 1",
+              static_cast<int32_t>(db_schema->get_database_name_str().length()),
+              db_schema->get_database_name_str().ptr(),
+              static_cast<int32_t>(table_schema.get_table_name_str().length()),
+              table_schema.get_table_name_str().ptr(),
+              static_cast<int32_t>(strlen(state_name)), state_name,
+              static_cast<int64_t>(AI_ROW_READY)))) {
+        LOG_WARN("failed to build strict read check sql", K(ret));
+      } else {
+        query::ObSessionInnerSql inner_sql(session);
+        common::ObISQLClient::ReadResult result;
+        if (OB_FAIL(inner_sql.execute_read(sql, result))) {
+          LOG_WARN("failed to run strict read check", K(ret), K(sql));
+        } else {
+          sqlclient::ObMySQLResult *res = result.mysql_result();
+          if (OB_ISNULL(res)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            int cr = res->next();
+            if (OB_SUCCESS == cr) {
+              // at least one row is not READY: column level failure
+              ret = OB_AI_COLUMN_HAS_UNFINISHED_TASK;
+              LOG_USER_ERROR(OB_AI_COLUMN_HAS_UNFINISHED_TASK,
+                             static_cast<long>(table_schema.get_table_id()),
+                             static_cast<long>(result_col.get_column_id()));
+              LOG_WARN("ai column strict read failed", K(ret),
+                       "table_id", table_schema.get_table_id(),
+                       "column_id", result_col.get_column_id());
+            } else if (OB_ITER_END != cr) {
+              ret = cr;
+              LOG_WARN("failed to iterate strict read result", K(ret));
+            } else {
+              ret = OB_SUCCESS; // all rows READY
+            }
+          }
+          int close_ret = result.close();
+          if (OB_SUCCESS == ret && OB_SUCCESS != close_ret) {
+            ret = close_ret;
+          }
+        }
+      }
+    }
+  }
+  return ret;
 }
 
 } // namespace sql

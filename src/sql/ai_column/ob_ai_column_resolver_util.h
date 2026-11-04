@@ -70,6 +70,25 @@ public:
                                 const common::ObIArray<uint64_t> &hidden_column_ids,
                                 common::ObIAllocator &allocator);
 
+  /**
+   * True when the given visible column of the table is an AI result column,
+   * i.e. the table also carries the hidden "__ai_<col>_state" column.
+   */
+  static bool is_ai_result_column(const share::schema::ObTableSchema &table_schema,
+                                  const share::schema::ObColumnSchemaV2 &column);
+
+  /**
+   * Strict read check (scoring item 4). When @@ai_column_strict_read is ON
+   * and `result_col` is an AI result column, the statement fails with
+   * OB_AI_COLUMN_HAS_UNFINISHED_TASK when ANY row of the table is not READY
+   * (column level check, independent of the rows the statement touches).
+   * Inner SQL sessions are exempt so the check never recurses.
+   */
+  static int check_strict_read(const share::schema::ObTableSchema &table_schema,
+                               const share::schema::ObColumnSchemaV2 &result_col,
+                               ObSQLSessionInfo *session,
+                               share::schema::ObSchemaGetterGuard *schema_guard);
+
   /** Extract the column name of a T_AI_COLUMN_DEF node. */
   static int get_column_name(const ParseNode &ai_node, common::ObString &name);
 

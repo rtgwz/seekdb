@@ -172,6 +172,13 @@ protected:
   int generate_autoinc_params(ObInsertTableInfo &table_info);
   int get_value_row_size(uint64_t &count);
 
+  /**
+   * Business SQL must not write an AI result column directly (seekdb task 3):
+   * returns OB_NOT_SUPPORTED when (table_id, column_id) addresses an AI
+   * result column of a user table.
+   */
+  int check_ai_column_write_target(uint64_t table_id, uint64_t column_id);
+
   int resolve_insert_columns(const ParseNode *node,
                              ObInsertTableInfo& table_info);
   int resolve_insert_values(const ParseNode *node,

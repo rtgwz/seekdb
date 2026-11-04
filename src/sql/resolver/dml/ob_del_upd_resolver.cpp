@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "ob_del_upd_resolver.h"
+#include "sql/ai_column/ob_ai_column_resolver_util.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/resolver/dml/ob_insert_stmt.h"
@@ -118,6 +119,10 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
             }
           }
         }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(check_ai_column_write_target(table->ref_id_,
+              ref_expr->get_column_id()))) {
+        // business SQL must not write an AI result column directly
       }
       if (OB_SUCC(ret) && T_INSERT_SCOPE == scope) {
         if (OB_FAIL(mock_values_column_ref(ref_expr))) {
@@ -2120,6 +2125,28 @@ int ObDelUpdResolver::get_value_row_size(uint64_t& value_row_size)
   return ret;
 }
 
+int ObDelUpdResolver::check_ai_column_write_target(uint64_t table_id,
+                                                   uint64_t column_id)
+{
+  int ret = OB_SUCCESS;
+  const share::schema::ObTableSchema *table_schema = NULL;
+  if (OB_ISNULL(schema_checker_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table_id, table_schema))) {
+    LOG_WARN("failed to get table schema", K(ret), K(table_id));
+  } else if (OB_NOT_NULL(table_schema)) {
+    const share::schema::ObColumnSchemaV2 *col_schema =
+        table_schema->get_column_schema(column_id);
+    if (OB_NOT_NULL(col_schema)
+        && ObAiColumnResolverUtil::is_ai_result_column(*table_schema, *col_schema)) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "writing an AI column directly");
+      LOG_WARN("cannot write an AI column directly", K(ret), K(table_id), K(column_id));
+    }
+  }
+  return ret;
+}
+
 int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
                                              ObInsertTableInfo& table_info)
 {
@@ -2170,6 +2197,9 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
       } else if (!session_info_->get_ddl_info().is_ddl() && OB_HIDDEN_SESS_CREATE_TIME_COLUMN_ID == column_expr->get_column_id()) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "specify __sess_create_time value");
+      } else if (OB_FAIL(check_ai_column_write_target(table_item->ref_id_,
+                                                      column_expr->get_column_id()))) {
+        // business SQL must not write an AI result column directly
       } else if (OB_FAIL(mock_values_column_ref(column_expr))) {
       }
     }//end for

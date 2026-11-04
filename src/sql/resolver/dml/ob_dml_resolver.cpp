@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "ob_dml_resolver.h"
+#include "sql/ai_column/ob_ai_column_resolver_util.h"
 #include "sql/resolver/dml/ob_view_table_resolver.h"
 #include "sql/optimizer/ob_optimizer_util.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
@@ -1944,6 +1945,14 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
           column_item.set_default_value_expr(ref_expr);
         }
       }
+    }
+    // AI column strict read (seekdb task 3 scoring item 4): a statement that
+    // references an AI result column fails with 11120 when ANY row of the
+    // table is not READY (column level check, independent of touched rows)
+    if (OB_SUCC(ret)
+        && OB_FAIL(ObAiColumnResolverUtil::check_strict_read(
+                *table_schema, *col_schema, session_info_, schema_guard))) {
+      LOG_WARN("ai column strict read check failed", K(ret));
     }
     //init column item
     if (OB_SUCC(ret)) {
