@@ -57,8 +57,8 @@ int ObAiColumnWorker::start()
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else {
-    ThreadPool::init();
-    if (OB_FAIL(ThreadPool::start())) {
+    lib::ThreadPool::init();
+    if (OB_FAIL(lib::ThreadPool::start())) {
       LOG_WARN("failed to start ai column worker", K(ret));
     }
   }
@@ -68,8 +68,8 @@ int ObAiColumnWorker::start()
 void ObAiColumnWorker::stop()
 {
   stopped_ = true;
-  ThreadPool::stop();
-  ThreadPool::wait();
+  lib::ThreadPool::stop();
+  lib::ThreadPool::wait();
 }
 
 void ObAiColumnWorker::run1()
@@ -157,7 +157,8 @@ int ObAiColumnWorker::execute_group(const common::ObIArray<ObAiColumnTaskRecord>
   return ret;
 }
 
-int ObAiColumnWorker::eval_model_input(const share::schema::ObTableSchema &table_schema,
+int ObAiColumnWorker::eval_model_input(const common::ObString &database_name,
+                                       const share::schema::ObTableSchema &table_schema,
                                        const ObAiColumnMeta &meta,
                                        const ObAiColumnTaskRecord &task,
                                        common::ObString &input)
@@ -170,10 +171,10 @@ int ObAiColumnWorker::eval_model_input(const share::schema::ObTableSchema &table
   ObSqlString sql;
   if (OB_FAIL(sql.assign_fmt("SELECT %.*s FROM `%.*s`.`%.*s` WHERE %.*s",
           static_cast<int32_t>(meta.expr_str_.length()), meta.expr_str_.ptr(),
-          static_cast<int32_t>(table_schema.get_database_name().length()),
-          table_schema.get_database_name().ptr(),
-          static_cast<int32_t>(table_schema.get_table_name().length()),
-          table_schema.get_table_name().ptr(),
+          static_cast<int32_t>(database_name.length()),
+          database_name.ptr(),
+          static_cast<int32_t>(table_schema.get_table_name_str().length()),
+          table_schema.get_table_name_str().ptr(),
           static_cast<int32_t>(task.rowkey_predicate_.length()),
           task.rowkey_predicate_.ptr()))) {
     LOG_WARN("failed to build eval sql", K(ret));
@@ -207,7 +208,8 @@ int ObAiColumnWorker::call_model(const ObAiColumnMeta &meta,
   return ret;
 }
 
-int ObAiColumnWorker::write_back(const share::schema::ObTableSchema &table_schema,
+int ObAiColumnWorker::write_back(const common::ObString &database_name,
+                                 const share::schema::ObTableSchema &table_schema,
                                  const ObAiColumnMeta &meta,
                                  const ObAiColumnTaskRecord &task,
                                  const common::ObString &answer,
@@ -229,10 +231,10 @@ int ObAiColumnWorker::write_back(const share::schema::ObTableSchema &table_schem
     if (OB_FAIL(sql.assign_fmt(
             "UPDATE `%.*s`.`%.*s` SET `%.*s` = '%.*s', `%.*s` = %ld "
             "WHERE %.*s AND `%.*s` = %lu",
-            static_cast<int32_t>(table_schema.get_database_name().length()),
-            table_schema.get_database_name().ptr(),
-            static_cast<int32_t>(table_schema.get_table_name().length()),
-            table_schema.get_table_name().ptr(),
+            static_cast<int32_t>(database_name.length()),
+            database_name.ptr(),
+            static_cast<int32_t>(table_schema.get_table_name_str().length()),
+            table_schema.get_table_name_str().ptr(),
             static_cast<int32_t>(meta.column_name_.length()), meta.column_name_.ptr(),
             static_cast<int32_t>(answer.length()), answer.ptr(),
             static_cast<int32_t>(state_col->get_column_name_str().length()),

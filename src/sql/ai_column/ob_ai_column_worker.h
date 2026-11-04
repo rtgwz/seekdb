@@ -106,7 +106,8 @@ private:
    * Evaluate the column expression for the target row. Returns the model
    * input string (e.g. 'Classify: initial' in the tests).
    */
-  int eval_model_input(const share::schema::ObTableSchema &table_schema,
+  int eval_model_input(const common::ObString &database_name,
+                       const share::schema::ObTableSchema &table_schema,
                        const ObAiColumnMeta &meta,
                        const ObAiColumnTaskRecord &task,
                        common::ObString &input);
@@ -121,7 +122,8 @@ private:
                  common::ObString &answer,
                  bool &transient_failure);
   /** Write the answer back with the stale guard; returns rows affected. */
-  int write_back(const share::schema::ObTableSchema &table_schema,
+  int write_back(const common::ObString &database_name,
+                 const share::schema::ObTableSchema &table_schema,
                  const ObAiColumnMeta &meta,
                  const ObAiColumnTaskRecord &task,
                  const common::ObString &answer,

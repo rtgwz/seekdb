@@ -28,7 +28,8 @@ int ObAiColumnTaskUtil::format_rowkey_predicate(const common::ObString &pk_colum
                               pk_literal.ptr());
 }
 
-int ObAiColumnTaskUtil::build_invalidate_sql(const share::schema::ObTableSchema &table_schema,
+int ObAiColumnTaskUtil::build_invalidate_sql(const common::ObString &db_name,
+                                             const share::schema::ObTableSchema &table_schema,
                                              const ObAiColumnMeta &meta,
                                              uint64_t request_id,
                                              const common::ObString &rowkey_predicate,
@@ -39,7 +40,6 @@ int ObAiColumnTaskUtil::build_invalidate_sql(const share::schema::ObTableSchema 
       table_schema.get_column_schema(meta.state_column_id_);
   const share::schema::ObColumnSchemaV2 *request_col =
       table_schema.get_column_schema(meta.request_column_id_);
-  const common::ObString &db_name = table_schema.get_database_name_str();
   const common::ObString &tb_name = table_schema.get_table_name_str();
   if (OB_ISNULL(state_col) || OB_ISNULL(request_col)) {
     ret = OB_ERR_UNEXPECTED;
@@ -115,6 +115,7 @@ int ObAiColumnTaskUtil::build_task_delete_sql(
 }
 
 int ObAiColumnTaskUtil::build_strict_read_check_sql(
+    const common::ObString &db_name,
     const share::schema::ObTableSchema &table_schema,
     const ObAiColumnMeta &meta,
     common::ObSqlString &sql)
@@ -122,7 +123,6 @@ int ObAiColumnTaskUtil::build_strict_read_check_sql(
   int ret = OB_SUCCESS;
   const share::schema::ObColumnSchemaV2 *state_col =
       table_schema.get_column_schema(meta.state_column_id_);
-  const common::ObString &db_name = table_schema.get_database_name_str();
   const common::ObString &tb_name = table_schema.get_table_name_str();
   if (OB_ISNULL(state_col)) {
     ret = OB_ERR_UNEXPECTED;

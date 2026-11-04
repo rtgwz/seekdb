@@ -47,7 +47,8 @@ public:
    * request_id (ai_column_worker: one_request_group_for_two_columns), which
    * the worker uses to publish grouped results atomically.
    */
-  static int build_invalidate_sql(const share::schema::ObTableSchema &table_schema,
+  static int build_invalidate_sql(const common::ObString &database_name,
+                                  const share::schema::ObTableSchema &table_schema,
                                   const ObAiColumnMeta &meta,
                                   uint64_t request_id,
                                   const common::ObString &rowkey_predicate,
@@ -79,7 +80,8 @@ public:
    * (ai_column_retry_strict lines "Strictness is column-wide").
    * Error: OB_AI_COLUMN_HAS_UNFINISHED_TASK with table_id / column_id.
    */
-  static int build_strict_read_check_sql(const share::schema::ObTableSchema &table_schema,
+  static int build_strict_read_check_sql(const common::ObString &database_name,
+                                         const share::schema::ObTableSchema &table_schema,
                                          const ObAiColumnMeta &meta,
                                          common::ObSqlString &sql);
 

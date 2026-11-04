@@ -188,7 +188,8 @@ int ObAiColumnResolverUtil::resolve_ai_column_def(
       }
       if (OB_SUCC(ret)) {
         common::ObString joined(static_cast<int32_t>(pos), type_buf);
-        if (0 == joined.case_compare(0, 6, "vector")) {
+        if (joined.length() >= 6
+            && 0 == strncasecmp(joined.ptr(), "vector", 6)) {
           is_vector = true;
           const char *dim_str = nullptr;
           for (int64_t e = 0; e < ext_info.count(); ++e) {
