@@ -94,6 +94,7 @@ int ObSql::init(common::ObOptStatManager *opt_stat_mgr,
       srs_provider_ = &srs_provider;
       lob_read_service_ = &lob_read_service;
       self_addr_ = addr;
+      file_sql_pcas_ = &plan_cache_access_service;
       inited_ = true;
       queue_.start();
     }
@@ -2066,7 +2067,11 @@ int ObSql::execute_file_copy(filesql::CopyExportSpec &spec,
                              ObIAllocator &allocator)
 {
   int ret = OB_SUCCESS;
-  ObResultSet *inner_rs = ObResultSet::alloc(result.get_session(), allocator);
+  void *inner_buf = allocator.alloc(sizeof(ObResultSet));
+  ObResultSet *inner_rs = (OB_NOT_NULL(inner_buf) && OB_NOT_NULL(file_sql_pcas_))
+      ? new (inner_buf) ObResultSet(result.get_session(), allocator,
+                                    *file_sql_pcas_)
+      : NULL;
   if (OB_ISNULL(inner_rs)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("alloc inner result set for file copy failed", K(ret));
@@ -2128,7 +2133,8 @@ int ObSql::execute_file_copy(filesql::CopyExportSpec &spec,
     }
   }
   if (OB_NOT_NULL(inner_rs)) {
-    ObResultSet::free(inner_rs);
+    inner_rs->~ObResultSet();
+    allocator.free(inner_buf);
     inner_rs = NULL;
   }
   return ret;

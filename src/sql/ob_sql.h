@@ -108,6 +108,8 @@ class ObSql : public ObIPLSqlRuntime,
 
   static const int64_t max_error_length;
   static const int64_t SQL_MEM_SIZE_LIMIT;
+  // seekdb file sql: cached for constructing nested result sets (COPY TO)
+  query::ObIPlanCacheAccessService *file_sql_pcas_;
 public:
   /// init SQL module
   int init(common::ObOptStatManager *opt_stat_mgr,

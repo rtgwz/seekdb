@@ -12,9 +12,9 @@
 
 #include "common/ob_field.h"
 #include "common/object/ob_object.h"
-#include "common/ob_new_row.h"
+#include "common/row/ob_row.h"
 #include "common/timezone/ob_time_convert.h"
-#include "lib/timezone/ob_timezone_info.h"
+#include "common/timezone/ob_timezone_info.h"
 #include "share/system_variable/ob_sys_var_class_type.h"
 #include "sql/session/ob_sql_session_info.h"
 
@@ -144,7 +144,7 @@ int ObFileSqlProcessor::write_copy_row(void *file, const ObNewRow *row,
         } else if (ob_is_datetime_tc(type)) {
           int64_t pos = 0;
           if (OB_FAIL(ObTimeConverter::datetime_to_str(obj.get_datetime(), tz,
-                                                       buf, sizeof(buf) - 1, pos))) {
+                                                       0, buf, sizeof(buf) - 1, pos))) {
             LOG_WARN("datetime to str failed", K(ret));
           } else {
             buf[pos] = '\0';
