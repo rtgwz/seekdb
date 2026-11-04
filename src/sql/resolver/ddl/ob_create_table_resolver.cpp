@@ -680,6 +680,20 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
     }
 
     int64_t resolved_cols_count = resolved_cols.count();
+    // AI columns cannot depend on other AI columns: collect their names up front
+    // so that every ai column def sees the full list (ai_column_ddl test 8).
+    ObSEArray<common::ObString, 4> ai_column_names;
+    for (int32_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+      ParseNode *element = node->children_[i];
+      if (OB_NOT_NULL(element) && T_AI_COLUMN_DEF == element->type_) {
+        common::ObString ai_name;
+        if (OB_FAIL(ObAiColumnResolverUtil::get_column_name(*element, ai_name))) {
+          LOG_WARN("failed to get ai column name", K(ret));
+        } else if (OB_FAIL(ai_column_names.push_back(ai_name))) {
+          LOG_WARN("failed to push ai column name", K(ret));
+        }
+      }
+    }
     // Second pass traversal, use resolved_cols to parse out all column schema and save to table_schema
     // And parse index etc
     for (int32_t i = 0, ele_pos = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
@@ -707,13 +721,23 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           ++ele_pos;
           common::ObDataType data_type;
           ObAiColumnMeta ai_meta;
-          ObSEArray<common::ObString, 4> ai_column_names; // TODO: collect from stmt
           if (OB_FAIL(ObResolverUtils::resolve_data_type(
                   *element->children_[1], column.get_column_name(), data_type,
                   false, session_info_->get_session_nls_params(),
                   false, false))) {
-          } else if (OB_FAIL(column.set_data_type(data_type))) {
-          } else if (OB_FAIL(ObAiColumnResolverUtil::resolve_ai_column_def(
+          } else {
+            // same type assignment as ObDDLResolver::resolve_column_definition
+            column.set_meta_type(data_type.get_meta_type());
+            column.set_accuracy(data_type.get_accuracy());
+            column.set_charset_type(data_type.get_charset_type());
+            column.set_collation_type(data_type.get_collation_type());
+            if (column.is_collection()
+                && OB_FAIL(resolve_collection_column(element->children_[1], column))) {
+              LOG_WARN("failed to resolve collection type info for ai column", K(ret));
+            }
+          }
+          if (OB_SUCC(ret)
+              && OB_FAIL(ObAiColumnResolverUtil::resolve_ai_column_def(
                   *element, column, ai_column_names, *allocator_, ai_meta))) {
           } else {
             // hidden column ids are allocated from the same generator so the
