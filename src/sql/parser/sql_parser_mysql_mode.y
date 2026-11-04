@@ -4952,11 +4952,11 @@ ai_column_option
 ;
 
 ai_column_option:
-column_name EQ STRING_VALUE
+column_name COMP_EQ STRING_VALUE
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3);
 }
-| column_name EQ INT_NUM
+| column_name COMP_EQ INTNUM
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3);
 }
