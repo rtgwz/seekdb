@@ -12,6 +12,7 @@
 #include "sql/ai_column/ob_ai_column_resolver_util.h"
 #include "lib/string/ob_sql_string.h"
 #include "common/object/ob_obj_type.h"
+#include "share/schema/ob_ai_column_spec.h"
 
 namespace oceanbase
 {
@@ -171,6 +172,21 @@ int ObAiColumnResolverUtil::resolve_ai_column_def(
         }
       }
     }
+    // remember the dependency columns: UPDATE of any of them invalidates the
+    // result (ai_column_t1_dml: unrelated column update must NOT trigger)
+    if (OB_SUCC(ret) && deps.count() > 0) {
+      common::ObSqlString dep_list;
+      for (int64_t i = 0; OB_SUCC(ret) && i < deps.count(); ++i) {
+        if (OB_FAIL(dep_list.append_fmt("%s%.*s", 0 == i ? "" : ",",
+                static_cast<int32_t>(deps.at(i).length()), deps.at(i).ptr()))) {
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(ob_write_string(allocator, dep_list.string(),
+                                         meta.dep_columns_))) {
+        LOG_WARN("failed to persist dep columns", K(ret));
+      }
+    }
 
     // 3. dimension check for AI_EMBED(model, expr[, dim])
     // vector(N) is an extend type: the type info array carries the dimension
@@ -269,7 +285,8 @@ int ObAiColumnResolverUtil::resolve_ai_column_def(
 int ObAiColumnResolverUtil::add_hidden_columns(
     share::schema::ObTableSchema &table_schema,
     const ObAiColumnMeta &meta,
-    const common::ObIArray<uint64_t> &hidden_column_ids)
+    const common::ObIArray<uint64_t> &hidden_column_ids,
+    common::ObIAllocator &allocator)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(3 != hidden_column_ids.count())) {
@@ -282,6 +299,23 @@ int ObAiColumnResolverUtil::add_hidden_columns(
     static const common::ObObjType types[3] = {common::ObIntType,
                                                common::ObIntType,
                                                common::ObVarcharType};
+    // The full definition travels to the schema service as the comment of the
+    // hidden result_spec column (see share::ObAiColumnSpecCodec), where
+    // ObTableSqlService persists it into oceanbase.__all_ai_column.
+    share::ObAiColumnSpec spec;
+    common::ObString spec_comment;
+    spec.column_name_ = meta.column_name_;
+    spec.ai_model_name_ = meta.ai_model_name_;
+    spec.dep_columns_ = meta.dep_columns_;
+    spec.normalized_expr_ = meta.normalized_expr_;
+    spec.expr_str_ = meta.expr_str_;
+    spec.func_type_ = meta.func_type_;
+    spec.sync_mode_ = meta.sync_mode_;
+    spec.max_retries_ = meta.max_retries_;
+    spec.vector_dim_ = meta.vector_dim_;
+    if (OB_FAIL(share::ObAiColumnSpecCodec::serialize(spec, allocator, spec_comment))) {
+      LOG_WARN("failed to serialize ai column spec", K(ret));
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
       share::schema::ObColumnSchemaV2 hidden_col;
       char buf[OB_MAX_COLUMN_NAME_BUF_LENGTH + 8];
@@ -298,7 +332,10 @@ int ObAiColumnResolverUtil::add_hidden_columns(
         hidden_col.set_collation_type(common::CS_TYPE_UTF8MB4_BIN);
         hidden_col.set_nullable(true);
         hidden_col.set_is_hidden(true); // is_hidden = 1 in __all_column
-        if (OB_FAIL(table_schema.add_column(hidden_col))) {
+        if (2 == i && OB_NOT_NULL(spec_comment.ptr())
+            && OB_FAIL(hidden_col.set_comment(spec_comment))) {
+          LOG_WARN("failed to set ai spec comment", K(ret));
+        } else if (OB_FAIL(table_schema.add_column(hidden_col))) {
           LOG_WARN("failed to add hidden ai column", K(ret));
         }
       }

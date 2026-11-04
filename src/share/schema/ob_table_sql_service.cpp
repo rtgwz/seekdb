@@ -20,6 +20,7 @@
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
 #include "share/schema/ob_partition_sql_helper.h"
+#include "share/schema/ob_ai_column_spec.h"
 #include "share/ob_timezone_mgr.h"
 
 namespace oceanbase
@@ -889,6 +890,15 @@ int ObTableSqlService::insert_single_column(
   if (OB_FAIL(check_ddl_allowed(new_table_schema))) {
   } else if (OB_FAIL(add_single_column(sql_client, new_column_schema))) {
   }
+  // AI column of ALTER TABLE ... ADD COLUMN: when the hidden result_spec
+  // column carrying the spec comment lands, persist the __all_ai_column row.
+  if (OB_SUCC(ret)
+      && ObAiColumnSpecCodec::is_spec_comment(new_column_schema.get_comment_str())) {
+    if (OB_FAIL(persist_ai_column_meta(sql_client, new_table_schema,
+                                       &new_column_schema))) {
+      LOG_WARN("failed to persist ai column meta for alter add column", K(ret));
+    }
+  }
   if (OB_SUCC(ret)) {
     if (new_column_schema.is_autoincrement()) {
       if (OB_FAIL(add_sequence(sql_client,
@@ -908,6 +918,113 @@ int ObTableSqlService::insert_single_column(
     opt.schema_version_ = new_column_schema.get_schema_version();
     if (OB_FAIL(log_operation_wrapper(opt, sql_client))) {
     }
+  }
+  return ret;
+}
+
+int ObTableSqlService::persist_ai_column_meta(
+    ObISQLClient &sql_client,
+    const ObTableSchema &table_schema,
+    const ObColumnSchemaV2 *spec_column)
+{
+  int ret = OB_SUCCESS;
+  if (is_inner_table(table_schema.get_table_id())) {
+    // AI columns only exist on user tables
+  } else {
+    ObArenaAllocator allocator(ObModIds::OB_SCHEMA_OB_SCHEMA_ARENA);
+    ObDMLSqlSplicer dml;
+    ObDMLSqlSplicer history_dml;
+    int64_t row_count = 0;
+    for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
+         OB_SUCC(ret) && iter != table_schema.column_end(); ++iter) {
+      const ObColumnSchemaV2 *column = OB_NOT_NULL(iter) ? *iter : nullptr;
+      if (OB_ISNULL(column)) {
+      } else if (OB_NOT_NULL(spec_column)
+                 && column->get_column_id() != spec_column->get_column_id()) {
+      } else if (!ObAiColumnSpecCodec::is_spec_comment(column->get_comment_str())) {
+      } else {
+        ObAiColumnSpec spec;
+        const ObColumnSchemaV2 *state_col = nullptr;
+        const ObColumnSchemaV2 *request_col = nullptr;
+        const ObColumnSchemaV2 *result_col = nullptr;
+        char state_name[OB_MAX_COLUMN_NAME_LENGTH];
+        char request_name[OB_MAX_COLUMN_NAME_LENGTH];
+        int64_t pos = 0;
+        if (OB_FAIL(ObAiColumnSpecCodec::deserialize(column->get_comment_str(),
+                                                     allocator, spec))) {
+          LOG_WARN("failed to deserialize ai column spec", K(ret));
+        } else if (OB_FAIL(databuff_printf(state_name, sizeof(state_name), pos,
+                "__ai_%.*s_state", static_cast<int32_t>(spec.column_name_.length()),
+                spec.column_name_.ptr()))) {
+        } else if (FALSE_IT(pos = 0)) {
+        } else if (OB_FAIL(databuff_printf(request_name, sizeof(request_name), pos,
+                "__ai_%.*s_request", static_cast<int32_t>(spec.column_name_.length()),
+                spec.column_name_.ptr()))) {
+        } else if (OB_ISNULL(result_col = table_schema.get_column_schema(spec.column_name_))
+                   || OB_ISNULL(state_col = table_schema.get_column_schema(state_name))
+                   || OB_ISNULL(request_col = table_schema.get_column_schema(request_name))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ai column schema incomplete", K(ret), K(spec.column_name_));
+        } else {
+          // main row
+          if (OB_FAIL(build_ai_column_meta_row(dml, table_schema, spec,
+                  result_col->get_column_id(), state_col->get_column_id(),
+                  request_col->get_column_id(), column->get_column_id()))) {
+          } else if (OB_FAIL(build_ai_column_meta_row(history_dml, table_schema, spec,
+                  result_col->get_column_id(), state_col->get_column_id(),
+                  request_col->get_column_id(), column->get_column_id()))) {
+          } else if (OB_FAIL(history_dml.add_pk_column("schema_version",
+                  ObSchemaUtils::get_extract_schema_id(table_schema.get_schema_version())))
+                  || OB_FAIL(history_dml.add_column("is_deleted", 0))
+                  || OB_FAIL(history_dml.finish_row())) {
+            LOG_WARN("failed to finish ai column history row", K(ret));
+          } else {
+            ++row_count;
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret) && row_count > 0) {
+      int64_t affected_rows = 0;
+      ObDMLExecHelper exec(sql_client);
+      if (OB_FAIL(exec.exec_insert(OB_ALL_AI_COLUMN_TNAME, dml, affected_rows))) {
+        LOG_WARN("failed to insert __all_ai_column", K(ret));
+      } else if (OB_FAIL(exec.exec_insert(OB_ALL_AI_COLUMN_HISTORY_TNAME,
+              history_dml, affected_rows))) {
+        LOG_WARN("failed to insert __all_ai_column_history", K(ret));
+      } else {
+        LOG_INFO("persisted ai column meta", K(ret), K(row_count),
+                 "table_id", table_schema.get_table_id());
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::build_ai_column_meta_row(ObDMLSqlSplicer &dml,
+    const ObTableSchema &table_schema, const ObAiColumnSpec &spec,
+    const uint64_t column_id, const uint64_t state_column_id,
+    const uint64_t request_column_id, const uint64_t result_spec_column_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(
+          table_schema.get_table_id())))
+      || OB_FAIL(dml.add_pk_column("column_id", column_id))
+      || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(spec.column_name_)))
+      || OB_FAIL(dml.add_column("ai_model_name", ObHexEscapeSqlStr(spec.ai_model_name_)))
+      || OB_FAIL(dml.add_column("func_type", spec.func_type_))
+      || OB_FAIL(dml.add_column("sync_mode", spec.sync_mode_))
+      || OB_FAIL(dml.add_column("max_retries", spec.max_retries_))
+      || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(spec.normalized_expr_)))
+      || OB_FAIL(dml.add_column("expr_str", ObHexEscapeSqlStr(spec.expr_str_)))
+      || OB_FAIL(dml.add_column("state_column_id", state_column_id))
+      || OB_FAIL(dml.add_column("request_column_id", request_column_id))
+      || OB_FAIL(dml.add_column("result_spec_column_id", result_spec_column_id))
+      || OB_FAIL(dml.add_column("vector_dim", spec.vector_dim_))
+      || OB_FAIL(dml.add_gmt_create())
+      || OB_FAIL(dml.add_gmt_modified())
+      || OB_FAIL(dml.finish_row())) {
+    LOG_WARN("failed to build ai column meta row", K(ret));
   }
   return ret;
 }
@@ -2154,6 +2271,8 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     } else if (OB_FAIL(batch_add_constraints_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_cst"))) {
     } else if (OB_FAIL(batch_add_table_part_info(sql_client, tables))) {
+    } else if (FALSE_IT(time_guard.click("insert_all_cst"))) {
+    } else if (OB_FAIL(batch_add_table_part_info(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("add_table_part_info"))) {
     } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_DDL_OPERATION_TNAME, ddl_operation_dml,
             tables.count()))) {
@@ -2163,6 +2282,16 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
       for (int64_t i = 0; i < tables.count() && OB_SUCC(ret); i++) {
         if (is_inner_table(tables.at(i).get_table_id())) {
         } else if (OB_FAIL(add_foreign_key(sql_client, tables.at(i), false/*only_history*/))) {
+        }
+      }
+      // AI column metadata (seekdb task 3): scan every created table for
+      // hidden result_spec columns carrying a spec comment. Failures here
+      // must not abort the CREATE TABLE, the worker tolerates missing rows.
+      for (int64_t i = 0; i < tables.count(); ++i) {
+        int tmp_ret = persist_ai_column_meta(sql_client, tables.at(i), nullptr);
+        if (OB_SUCCESS != tmp_ret) {
+          LOG_WARN("failed to persist ai column meta for created table",
+                   K(tmp_ret), "table_id", tables.at(i).get_table_id());
         }
       }
       time_guard.click("add_foreign_key");

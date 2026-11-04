@@ -28,6 +28,7 @@ class ObMySQLProxy;
 namespace share
 {
 class ObDMLSqlSplicer;
+struct ObAiColumnSpec;
 namespace schema
 {
 struct ObSchemaOperation;
@@ -125,6 +126,26 @@ public:
                            const ObTableSchema &new_table_schema,
                            const ObColumnSchemaV2 &column_schema,
                            const bool record_ddl_operation);
+  /**
+   * Persist AI column metadata (seekdb task 3) into oceanbase.__all_ai_column
+   * (+ history). The definition travels as the comment of the hidden
+   * "__ai_<col>_result_spec" column (see share::ObAiColumnSpecCodec); column
+   * ids are derived from `table_schema` so the rows stay correct no matter
+   * where the final ids were assigned.
+   * spec_column == nullptr : scan every column of the table (CREATE TABLE)
+   * spec_column != nullptr : persist only this column's AI column (ALTER ADD)
+   */
+  int persist_ai_column_meta(common::ObISQLClient &sql_client,
+                             const ObTableSchema &table_schema,
+                             const ObColumnSchemaV2 *spec_column);
+  /** One __all_ai_column row (without the history-only extras). */
+  int build_ai_column_meta_row(ObDMLSqlSplicer &dml,
+                               const ObTableSchema &table_schema,
+                               const ObAiColumnSpec &spec,
+                               const uint64_t column_id,
+                               const uint64_t state_column_id,
+                               const uint64_t request_column_id,
+                               const uint64_t result_spec_column_id);
   //alter table add constraint
   int insert_single_constraint(common::ObISQLClient &sql_client,
                            const ObTableSchema &new_table_schema,

@@ -754,10 +754,12 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             ai_meta.result_spec_column_id_ = hidden_ids[2];
             if (OB_FAIL(ret)) {
             } else if (OB_FAIL(ObAiColumnResolverUtil::add_hidden_columns(
-                    table_schema, ai_meta, hidden_id_arr))) {
+                    table_schema, ai_meta, hidden_id_arr, *allocator_))) {
             } else if (OB_FAIL(table_schema.add_column(column))) {
             } else {
-              // TODO(server): persist ai_meta into oceanbase.__all_ai_column
+              // ai_meta travels in the hidden result_spec column comment and
+              // is persisted into oceanbase.__all_ai_column by
+              // ObTableSqlService::persist_ai_column_meta on the rootserver.
               // after the CREATE TABLE ddl finishes
               // (ObAiColumnTaskUtil::build_meta_insert_sql)
             }

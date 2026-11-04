@@ -105,6 +105,7 @@ struct ObAiColumnMeta
   uint64_t result_spec_column_id_;
   common::ObString column_name_;
   common::ObString ai_model_name_;
+  common::ObString dep_columns_;     // comma separated dependency columns
   common::ObString normalized_expr_; // typed prompt + user expression, persisted
   common::ObString expr_str_;        // raw expression text, e.g. AI_COMPLETE('m', content)
   int64_t func_type_;

@@ -25,6 +25,8 @@
 #include "sql/session/ob_local_session_var.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "sql/ai_column/ob_ai_column_resolver_util.h"
+#include "share/schema/ob_ai_column_spec.h"
 
 namespace oceanbase
 {
@@ -3435,6 +3437,7 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
   } else {
     AlterColumnSchema alter_column_schema;
     ObColumnResolveStat stat;
+    ObSEArray<common::ObString, 4> ai_column_names_of_stmt_;
     for (int i = 0; OB_SUCC(ret) && i < node.num_child_; ++i) {
       alter_column_schema.reset();
       alter_column_schema.alter_type_ = OB_DDL_ADD_COLUMN;
@@ -3442,6 +3445,99 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
       if (OB_ISNULL(node.children_[i])) {
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "invalid parse tree", K(ret));
+      } else if (T_AI_COLUMN_DEF == node.children_[i]->type_) {
+        // ALTER TABLE ... ADD COLUMN <name> <type> AI COLUMN (...)
+        // Same shape as the CREATE TABLE path: one visible result column +
+        // three hidden columns; the definition travels to the schema service
+        // in the hidden result_spec column comment.
+        ParseNode *element = node.children_[i];
+        common::ObString ai_col_name;
+        ObAiColumnMeta ai_meta;
+        AlterColumnSchema ai_result_column;
+        common::ObDataType data_type;
+        ai_result_column.alter_type_ = OB_DDL_ADD_COLUMN;
+        if (OB_FAIL(ObAiColumnResolverUtil::get_column_name(*element, ai_col_name))) {
+          SQL_RESV_LOG(WARN, "failed to get ai column name", K(ret));
+        } else if (OB_FAIL(ai_result_column.set_column_name(ai_col_name))) {
+        } else if (OB_FAIL(ObResolverUtils::resolve_data_type(
+                *element->children_[1], ai_result_column.get_column_name_str(),
+                data_type, false, session_info_->get_session_nls_params(),
+                false, false))) {
+        } else {
+          ai_result_column.set_meta_type(data_type.get_meta_type());
+          ai_result_column.set_accuracy(data_type.get_accuracy());
+          ai_result_column.set_charset_type(data_type.get_charset_type());
+          ai_result_column.set_collation_type(data_type.get_collation_type());
+          if (ai_result_column.is_collection()
+              && OB_FAIL(resolve_collection_column(element->children_[1],
+                                                   ai_result_column))) {
+          } else if (OB_FAIL(ObAiColumnResolverUtil::resolve_ai_column_def(
+                  *element, ai_result_column, ai_column_names_of_stmt_,
+                  *allocator_, ai_meta))) {
+            SQL_RESV_LOG(WARN, "failed to resolve ai column def", K(ret));
+          } else {
+            // duplicate column name check against the existing table
+            if (OB_NOT_NULL(table_schema_->get_column_schema(ai_col_name))) {
+              ret = OB_ERR_COLUMN_DUPLICATE;
+              LOG_USER_ERROR(OB_ERR_COLUMN_DUPLICATE,
+                             static_cast<int32_t>(ai_col_name.length()),
+                             ai_col_name.ptr());
+            }
+          }
+          if (OB_SUCC(ret)) {
+            // add result column first, then the three hidden columns
+            if (OB_FAIL(alter_table_stmt->add_column(ai_result_column))) {
+            } else {
+              static const char *suffixes[3] = {AI_COLUMN_STATE_SUFFIX,
+                                                AI_COLUMN_REQUEST_SUFFIX,
+                                                AI_COLUMN_RESULT_SPEC_SUFFIX};
+              static const common::ObObjType types[3] = {common::ObIntType,
+                                                         common::ObIntType,
+                                                         common::ObVarcharType};
+              share::ObAiColumnSpec spec;
+              common::ObString spec_comment;
+              spec.column_name_ = ai_meta.column_name_;
+              spec.ai_model_name_ = ai_meta.ai_model_name_;
+              spec.dep_columns_ = ai_meta.dep_columns_;
+              spec.normalized_expr_ = ai_meta.normalized_expr_;
+              spec.expr_str_ = ai_meta.expr_str_;
+              spec.func_type_ = ai_meta.func_type_;
+              spec.sync_mode_ = ai_meta.sync_mode_;
+              spec.max_retries_ = ai_meta.max_retries_;
+              spec.vector_dim_ = ai_meta.vector_dim_;
+              if (OB_FAIL(share::ObAiColumnSpecCodec::serialize(spec, *allocator_,
+                                                                spec_comment))) {
+                SQL_RESV_LOG(WARN, "failed to serialize ai spec", K(ret));
+              }
+              for (int64_t h = 0; OB_SUCC(ret) && h < 3; ++h) {
+                AlterColumnSchema hidden_column;
+                char hidden_name[OB_MAX_COLUMN_NAME_BUF_LENGTH + 8];
+                int64_t pos = 0;
+                hidden_column.alter_type_ = OB_DDL_ADD_COLUMN;
+                if (OB_FAIL(databuff_printf(hidden_name, sizeof(hidden_name), pos,
+                        "%s%.*s%s", AI_COLUMN_HIDDEN_PREFIX,
+                        static_cast<int32_t>(ai_meta.column_name_.length()),
+                        ai_meta.column_name_.ptr(), suffixes[h]))) {
+                } else if (OB_FAIL(hidden_column.set_column_name(hidden_name))) {
+                } else {
+                  hidden_column.set_data_type(types[h]);
+                  hidden_column.set_collation_type(common::CS_TYPE_UTF8MB4_BIN);
+                  hidden_column.set_nullable(true);
+                  hidden_column.set_is_hidden(true);
+                  if (2 == h && OB_NOT_NULL(spec_comment.ptr())
+                      && OB_FAIL(hidden_column.set_comment(spec_comment))) {
+                  } else if (OB_FAIL(alter_table_stmt->add_column(hidden_column))) {
+                    SQL_RESV_LOG(WARN, "failed to add hidden ai column", K(ret));
+                  }
+                }
+              }
+              if (OB_SUCC(ret)
+                  && OB_FAIL(ai_column_names_of_stmt_.push_back(ai_col_name))) {
+                SQL_RESV_LOG(WARN, "failed to record ai column name", K(ret));
+              }
+            }
+          }
+        }
       } else {
         //resolve column definition
         stat.reset();

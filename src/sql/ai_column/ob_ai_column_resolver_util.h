@@ -67,7 +67,8 @@ public:
    */
   static int add_hidden_columns(share::schema::ObTableSchema &table_schema,
                                 const ObAiColumnMeta &meta,
-                                const common::ObIArray<uint64_t> &hidden_column_ids);
+                                const common::ObIArray<uint64_t> &hidden_column_ids,
+                                common::ObIAllocator &allocator);
 
   /** Extract the column name of a T_AI_COLUMN_DEF node. */
   static int get_column_name(const ParseNode &ai_node, common::ObString &name);
