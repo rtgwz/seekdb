@@ -74,7 +74,7 @@ void ObAiColumnWorker::stop()
 
 void ObAiColumnWorker::run1()
 {
-  while (!stopped_ && !lib::Thread::current().is_stoped()) {
+  while (!stopped_) {
     int ret = OB_SUCCESS;
     int64_t processed = 0;
     if (OB_FAIL(process_batch())) {
