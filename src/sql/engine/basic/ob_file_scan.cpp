@@ -1817,7 +1817,11 @@ int check_secure_path(const std::string &path, const std::string &secure_dir,
   ret = canonicalize_path(secure_dir, true, sec);
   if (ret != FS_OK) return FS_ERR_PATH_VIOLATION;
   if (canonical == sec) return FS_OK;
-  if (canonical.compare(0, sec.size() + 1, sec + "/") == 0) return FS_OK;
+  // prefix check tolerant of the filesystem root (sec == "/")
+  if (sec == "/") return FS_OK;
+  if (canonical.size() > sec.size()
+      && canonical.compare(0, sec.size(), sec) == 0
+      && canonical[sec.size()] == '/') return FS_OK;
   return FS_ERR_PATH_VIOLATION;
 }
 
@@ -1831,7 +1835,11 @@ int check_secure_write_path(const std::string &path, const std::string &secure_d
   ret = canonicalize_path(secure_dir, true, sec);
   if (ret != FS_OK) return FS_ERR_PATH_VIOLATION;
   if (canonical == sec) return FS_OK;
-  if (canonical.compare(0, sec.size() + 1, sec + "/") == 0) return FS_OK;
+  // prefix check tolerant of the filesystem root (sec == "/")
+  if (sec == "/") return FS_OK;
+  if (canonical.size() > sec.size()
+      && canonical.compare(0, sec.size(), sec) == 0
+      && canonical[sec.size()] == '/') return FS_OK;
   return FS_ERR_PATH_VIOLATION;
 }
 
