@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/ai_column/ob_ai_column_dml_hook.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "share/rc/ob_server_runtime.h"
 #include "sql/das/ob_das_insert_op.h"
@@ -630,6 +631,18 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
                                       dml_op))) {
     } else if (OB_FAIL(check_filter_row(ins_ctdef, dml_op.get_eval_ctx(), is_skipped))) {
     }
+    // AI column (seekdb task 3): capture the row for the invalidation +
+    // task creation published at statement close, inside the user transaction
+    if (OB_SUCC(ret) && !is_skipped
+        && OB_FAIL(ObAiColumnDmlHook::on_insert_row(
+                dml_op.get_exec_ctx(),
+                ins_ctdef.das_base_ctdef_.index_tid_,
+                ins_ctdef.das_base_ctdef_.column_ids_,
+                ins_ctdef.das_base_ctdef_.rowkey_cnt_,
+                ins_ctdef.new_row_,
+                dml_op.get_eval_ctx()))) {
+      LOG_WARN("ai column insert hook failed", K(ret));
+    }
 
   }
   return ret;
@@ -732,6 +745,17 @@ int ObDMLService::process_delete_row(const ObDelCtDef &del_ctdef,
     }
     LOG_DEBUG("process delete row", K(ret), K(is_skipped),
                "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), del_ctdef.old_row_));
+    // AI column: task cleanup capture for the deleted row
+    if (OB_SUCC(ret) && !is_skipped
+        && OB_FAIL(ObAiColumnDmlHook::on_delete_row(
+                dml_op.get_exec_ctx(),
+                del_ctdef.das_base_ctdef_.index_tid_,
+                del_ctdef.das_base_ctdef_.column_ids_,
+                del_ctdef.das_base_ctdef_.rowkey_cnt_,
+                del_ctdef.old_row_,
+                dml_op.get_eval_ctx()))) {
+      LOG_WARN("ai column delete hook failed", K(ret));
+    }
   }
 
   return ret;
@@ -831,6 +855,20 @@ int ObDMLService::process_update_row(const ObUpdCtDef &upd_ctdef,
     LOG_DEBUG("process update row", K(ret), K(is_skipped), K(upd_ctdef), K(upd_rtdef),
                 "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.old_row_),
                 "new_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.new_row_));
+    // AI column: dependency change / rowkey change capture
+    if (OB_SUCC(ret) && !is_skipped
+        && OB_FAIL(ObAiColumnDmlHook::on_update_row(
+                dml_op.get_exec_ctx(),
+                upd_ctdef.das_base_ctdef_.index_tid_,
+                upd_ctdef.das_base_ctdef_.column_ids_,
+                upd_ctdef.das_base_ctdef_.rowkey_cnt_,
+                upd_ctdef.old_row_,
+                upd_ctdef.new_row_,
+                upd_ctdef.dupd_ctdef_.updated_column_ids_,
+                dml_op.get_eval_ctx()))) {
+      LOG_WARN("ai column update hook failed", K(ret));
+    }
+
   }
   return ret;
 }

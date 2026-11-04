@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_table_modify_op.h"
+#include "sql/ai_column/ob_ai_column_dml_hook.h"
 #include "share/ob_autoincrement_service.h"
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "sql/engine/ob_physical_plan.h"
@@ -801,6 +802,14 @@ int ObTableModifyOp::inner_close()
   for (int64_t i = 0; i < autoinc_params.count(); ++i) {
     if (NULL != autoinc_params.at(i).cache_handle_) {
       auto_service.release_handle(autoinc_params.at(i).cache_handle_);
+    }
+  }
+  // AI column (seekdb task 3): publish the invalidations + tasks captured by
+  // the row hooks, still inside the user transaction
+  if (OB_SUCC(ret) && ObAiColumnDmlHook::has_pending()) {
+    ObSQLSessionInfo *ai_session = ctx_.get_my_session();
+    if (OB_FAIL(ObAiColumnDmlHook::flush_pending(ai_session))) {
+      LOG_WARN("failed to flush ai column events", K(ret));
     }
   }
   close_inner_conn();
